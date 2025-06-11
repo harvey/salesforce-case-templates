@@ -38,14 +38,61 @@
         dropdown.id = 'hcDropdown';
         dropdown.style.cssText = 'padding:8px;border-radius:4px;border:1px solid #dddbda;background:white;min-width:200px';
 
-        // Template action buttons
-        const buttonStyle = 'padding:8px 12px;border-radius:4px;border:1px solid #dddbda;background:#0176d3;color:white;cursor:pointer';
-        const saveBtn = document.createElement('button'); saveBtn.textContent = 'Save Case Template'; saveBtn.style.cssText = buttonStyle;
-        const exportBtn = document.createElement('button'); exportBtn.textContent = 'Export All Templates'; exportBtn.style.cssText = buttonStyle;
-        const importBtn = document.createElement('button'); importBtn.textContent = 'Import Templates'; importBtn.style.cssText = buttonStyle;
-        const deleteBtn = document.createElement('button'); deleteBtn.textContent = 'Delete Selected Template'; deleteBtn.style.cssText = buttonStyle;
-        const helpBtn = document.createElement('button'); helpBtn.textContent = 'Help'; helpBtn.style.cssText = buttonStyle + ';background:green';
-        const nameSpan = document.createElement('span'); nameSpan.textContent = 'Harvey Chandler'; nameSpan.style.cssText = 'font-weight:bold; margin-right:10px;text-decoration:underline; cursor:pointer; color:#0176d3';
+        // Utility to create a "fake button" span
+        function makeBtn(text, bg, handler) {
+            const span = document.createElement('span');
+            span.textContent = text;
+            span.style.cssText = `
+                display:inline-block;
+                padding:8px 12px;
+                border-radius:4px;
+                border:1px solid #dddbda;
+                background:${bg};
+                color:white;
+                cursor:pointer;
+                user-select:none;
+            `;
+            span.addEventListener('click', e => {
+                e.preventDefault();
+                handler();
+            });
+            return span;
+        }
+
+        const saveBtn   = makeBtn('Save Case Template',    '#0176d3', saveCurrentTemplate);
+        const exportBtn = makeBtn('Export All Templates',  '#0176d3', exportTemplates);
+        const importBtn = makeBtn('Import Templates',      '#0176d3', importTemplates);
+        const deleteBtn = makeBtn('Delete Selected Template', '#0176d3', deleteTemplate);
+
+        // --- ADD RIGHT-ANCHORED NAME REPLACER ---
+        const nameInput = document.createElement('input');
+        nameInput.id = 'hcNameInput';
+        nameInput.type = 'text';
+        nameInput.placeholder = 'Your Name';
+        nameInput.style.cssText = `
+            margin-left:auto;
+            padding:8px;
+            border-radius:4px;
+            border:1px solid #dddbda;
+            min-width:150px;
+        `;
+
+        const saveNamesBtn = makeBtn('Save Name to templates', '#28a745', () => {
+            const newName = nameInput.value.trim();
+            if (!newName) return alert('Please enter a name first.');
+            Object.keys(templates).forEach(key => {
+                const tpl = templates[key];
+                tpl.fields['CF00N0J000009ye9b'] = newName;
+            });
+            localStorage.setItem('caseTemplates', JSON.stringify(templates));
+            alert('All template contact names updated to "' + newName + '"');
+        });
+        // --- END ADDITIONS ---
+
+        const nameSpan  = document.createElement('span');
+        nameSpan.textContent = 'Harvey Chandler';
+        nameSpan.style.cssText = 'font-weight:bold; margin-left:10px; text-decoration:underline; cursor:pointer; color:#0176d3';
+        nameSpan.addEventListener('click', () => window.open('https://github.com/harvey', '_blank'));
 
         function refreshDropdown() {
             dropdown.innerHTML = '<option value="">-- Select Template --</option>';
@@ -57,7 +104,9 @@
                     opt.textContent = tpl.name;
                     dropdown.appendChild(opt);
                 });
-            const resetOpt = document.createElement('option'); resetOpt.value = 'reset'; resetOpt.textContent = 'Reset Form';
+            const resetOpt = document.createElement('option');
+            resetOpt.value = 'reset';
+            resetOpt.textContent = 'Reset Form';
             dropdown.appendChild(resetOpt);
         }
         refreshDropdown();
@@ -71,9 +120,11 @@
                 el.dispatchEvent(new Event('change', { bubbles: true }));
             } else if (el.type === 'checkbox') {
                 el.checked = Boolean(value);
+                el.dispatchEvent(new Event('change', { bubbles: true }));
             } else {
                 el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
             }
         }
 
@@ -86,10 +137,15 @@
         }
 
         function applyTemplate(template) {
+            // Ensure old notes are cleared so swapping templates updates correctly
+            const notesEl = document.getElementById('cas16');
+            if (notesEl) {
+                notesEl.value = '';
+                notesEl.dispatchEvent(new Event('input', { bubbles: true }));
+                notesEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
             Object.entries(template.fields).forEach(([id, val]) => {
-                if (IGNORED_FIELDS.includes(id)) return;
-                if (Array.isArray(val)) handleMultiSelect(id, val);
-                else setFieldValue(id, val);
+                Array.isArray(val) ? handleMultiSelect(id, val) : setFieldValue(id, val);
             });
         }
 
@@ -98,18 +154,13 @@
                 console.error('sendToBackground expects an array. Received:', array);
                 return;
             }
-
-            // Send a message to the background script
-            chrome.runtime.sendMessage(
-                { action: 'SEND_ARRAY', payload: array },
-                (response) => {
+            chrome.runtime.sendMessage({ action: 'SEND_ARRAY', payload: array }, response => {
                 if (chrome.runtime.lastError) {
                     console.error('Error sending message to background:', chrome.runtime.lastError);
                     return;
                 }
                 console.log('Content: Response from background:', response);
-                }
-            );
+            });
         }
 
         function resetForm() {
@@ -133,15 +184,27 @@
             const name = prompt('Enter template name:');
             if (!name) return;
             const key = name.toLowerCase();
-            if (templates[key] && !confirm(`Overwrite existing template \"${name}\"?`)) return;
+            const isOverwrite = !!templates[key];
+
+            // Ask if include case notes (cas16)
+            const includeNotes = confirm('Save case notes ("Case Details") in template?');
+
+            if (isOverwrite && !confirm(`Overwrite existing template "${templates[key].name}"?`)) return;
+
             const fields = {};
             targetSection.querySelectorAll('select, input, textarea').forEach(el => {
                 if (IGNORED_FIELDS.includes(el.id)) return;
+                // if (el.id === 'cas16' && !includeNotes) return;
+                if(includeNotes) {
+                    cas16 = document.getElementById('cas16').value;
+                    fields['cas16'] = cas16;
+                }
                 if (['button', 'submit', 'hidden'].includes(el.type)) return;
                 if (el.tagName === 'SELECT') fields[el.id] = el.options[el.selectedIndex]?.text || '';
                 else if (el.type === 'checkbox') fields[el.id] = el.checked;
                 else fields[el.id] = el.value;
             });
+
             templates[key] = { name, fields };
             localStorage.setItem('caseTemplates', JSON.stringify(templates));
             refreshDropdown();
@@ -150,23 +213,35 @@
         function exportTemplates() {
             const blob = new Blob([JSON.stringify(templates, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = 'case-templates.json'; a.click(); URL.revokeObjectURL(url);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'case-templates.json';
+            a.click();
+            URL.revokeObjectURL(url);
         }
 
         function importTemplates() {
+            const proceed = confirm(
+              "WARNING: This will clear your other templates, and replace with the new templates. Do you wish to proceed?"
+            );
+            if (!proceed) return;
             const input = document.createElement('input');
-            input.type = 'file'; input.accept = '.json';
+            input.type = 'file';
+            input.accept = '.json';
             input.onchange = e => {
                 const reader = new FileReader();
                 reader.onload = ev => {
                     try {
                         const imported = JSON.parse(ev.target.result);
-                        templates = { ...templates, ...imported };
+                        templates = {};
+                        localStorage.setItem('caseTemplates', JSON.stringify(templates));
+                        refreshDropdown();
+                        templates = imported;
                         localStorage.setItem('caseTemplates', JSON.stringify(templates));
                         refreshDropdown();
                         alert('Templates imported successfully!');
                     } catch {
-                        alert('Error importing templates: Invalid format');
+                        alert('Error importing templates: Invalid format');
                     }
                 };
                 reader.readAsText(e.target.files[0]);
@@ -177,7 +252,7 @@
         function deleteTemplate() {
             const key = dropdown.value;
             if (!key || key === 'reset') return;
-            if (!confirm(`Delete template \"${templates[key].name}\"?`)) return;
+            if (!confirm(`Delete template "${templates[key].name}"?`)) return;
             delete templates[key];
             localStorage.setItem('caseTemplates', JSON.stringify(templates));
             refreshDropdown();
@@ -185,30 +260,14 @@
 
         dropdown.addEventListener('change', () => {
             if (dropdown.value === 'reset') resetForm();
-            else if (templates[dropdown.value]) {applyTemplate(templates[dropdown.value]);
+            else if (templates[dropdown.value]) {
+                applyTemplate(templates[dropdown.value]);
                 sendToBackground([window.location.hostname]);
             }
         });
 
-        // class="mainTitle"
-
         const mainTitle = document.querySelector('.mainTitle');
-        //alert(mainTitle);
-        if(mainTitle?.textContent != 'Case Edit') return;
-
-        saveBtn.addEventListener('click', saveCurrentTemplate);
-        exportBtn.addEventListener('click', exportTemplates);
-        importBtn.addEventListener('click', importTemplates);
-        deleteBtn.addEventListener('click', deleteTemplate);
-
-        helpBtn.addEventListener('click', () => {
-            alert(``)
-        });
-
-        nameSpan.addEventListener('click', () => {
-            const url = 'https://github.com/harvey';
-            window.open(url, '_blank');
-        });
+        if (mainTitle?.textContent != 'Case Edit') return;
 
         // Assemble controls
         container.appendChild(dropdown);
@@ -216,8 +275,9 @@
         container.appendChild(exportBtn);
         container.appendChild(importBtn);
         container.appendChild(deleteBtn);
-        //container.appendChild(helpBtn);
         container.appendChild(nameSpan);
+        container.appendChild(nameInput);
+        container.appendChild(saveNamesBtn);
 
         const pageHeader = document.querySelector('.pbHeader');
         if (pageHeader) pageHeader.parentNode.insertBefore(container, pageHeader.nextSibling);
